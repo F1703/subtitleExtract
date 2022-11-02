@@ -4,17 +4,17 @@
 ```
 $ ./extractSubtitle.sh -h
 ```
-![](file01.png)
+![](img/file01.png)
 
 ```
 $ ./extractSubtitle.sh 
 ```
-![](file02.png)
+![](img/file02.png)s
 
 
 
 ```
 $ ./extractSubtitle.sh -a
 ```
-![](file03.png)
+![](img/file03.png)
 
