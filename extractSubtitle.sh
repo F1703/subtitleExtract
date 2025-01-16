@@ -1,6 +1,14 @@
 #!/bin/bash
-rm -fr *.log
+rm -fr *.log 2>/dev/null
 exte=".mp4|.mkv"
+
+# Verificar si ffmpeg está instalado
+if ! command -v ffmpeg &> /dev/null
+then
+    echo "Error: ffmpeg no está instalado. Por favor instálalo e intenta nuevamente."
+    exit 1
+fi
+
 
 modoDeUso() { 
     echo "Modo de uso: $0 [OPCIÓN]  ";
