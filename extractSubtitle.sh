@@ -1,168 +1,141 @@
-#!/bin/bash
-rm -fr *.log 2>/dev/null
-exte=".mp4|.mkv"
+#!/usr/bin/env bash
 
-# Verificar si ffmpeg está instalado
-if ! command -v ffmpeg &> /dev/null
-then
-    echo "Error: ffmpeg no está instalado. Por favor instálalo e intenta nuevamente."
+set -euo pipefail
+
+LIST_ONLY=false
+LANG_FILTER="${1:-}"
+
+check_dependencies() {
+  local missing=0
+  local deps=("ffmpeg" "ffprobe" "jq" "find" "xargs")
+
+  for cmd in "${deps[@]}"; do
+    if ! command -v "$cmd" &> /dev/null; then
+      echo "[-] Error: '$cmd' no está instalado o no está en el PATH."
+      missing=1
+    fi
+  done
+
+  if [[ "$missing" -eq 1 ]]; then
+    echo
+    echo "Instala las dependencias faltantes antes de continuar."
     exit 1
+  fi
+}
+
+check_dependencies
+
+usage() {
+  echo "Uso:"
+  echo "  $0 [idiomas]"
+  echo "  $0 -l"
+  echo
+  echo "Ejemplos:"
+  echo "  $0 eng,spa"
+  echo "  $0"
+  echo "  $0 -l"
+  exit 1
+}
+
+while getopts ":lh" opt; do
+  case $opt in
+    l) LIST_ONLY=true ;;
+    h) usage ;;
+    *) usage ;;
+  esac
+done
+
+shift $((OPTIND -1))
+
+LANG_FILTER="${1:-}"
+LANG_FILTER=$(echo "$LANG_FILTER" | tr 'A-Z' 'a-z')
+
+VIDEO_EXTENSIONS="mkv mp4 mov avi webm"
+
+find_videos() {
+  for ext in $VIDEO_EXTENSIONS; do
+    find . -maxdepth 1 -type f -iname "*.${ext}"
+  done
+}
+
+process_file() {
+  INPUT="$1"
+  BASENAME="$(basename "$INPUT")"
+  NAME="${BASENAME%.*}"
+  OUTDIR="${NAME}_subs"
+
+  TMP_JSON="$(mktemp)"
+
+  ffprobe -v error -select_streams s -show_streams -of json "$INPUT" > "$TMP_JSON"
+
+  SUB_COUNT=$(jq '.streams | length' "$TMP_JSON")
+
+  if [[ "$SUB_COUNT" -eq 0 ]]; then
+    rm -f "$TMP_JSON"
+    return
+  fi
+
+  echo
+  echo "[+] Archivo: $INPUT"
+
+  if $LIST_ONLY || [[ -z "$LANG_FILTER" ]]; then
+    echo "Subtítulos disponibles:"
+    jq -r '.streams[] | "Index: \(.index)\tCodec: \(.codec_name)\tLang: \(.tags.language // "unknown")\tTitle: \(.tags.title // "subtitle")"' "$TMP_JSON"
+    rm -f "$TMP_JSON"
+    return
+  fi
+
+  mkdir -p "$OUTDIR"
+
+  export INPUT NAME OUTDIR LANG_FILTER TMP_JSON
+
+  jq -r '.streams[].index' "$TMP_JSON" |
+  xargs -P 4 -n 1 bash -c '
+    idx="$1"
+    [[ -z "$idx" ]] && exit 0
+
+    stream=$(jq -c ".streams[] | select(.index == ($idx|tonumber))" "$TMP_JSON") || exit 0
+
+    codec=$(jq -r ".codec_name" <<<"$stream")
+    lang=$(jq -r ".tags.language // \"\"" <<<"$stream" | tr "A-Z" "a-z")
+    title=$(jq -r ".tags.title // \"subtitle\"" <<<"$stream")
+
+    if [[ -n "$LANG_FILTER" ]]; then
+      [[ -z "$lang" ]] && exit 0
+      echo ",$LANG_FILTER," | grep -q ",$lang," || exit 0
+    fi
+
+    safe=$(echo "$title" | tr " /()" "____")
+
+    case "$codec" in
+      hdmv_pgs_subtitle) ext="sup" ;;
+      subrip) ext="srt" ;;
+      ass|ssa) ext="ass" ;;
+      *) exit 0 ;;
+    esac
+
+    out="$OUTDIR/${NAME}_s${idx}_${lang}_${safe}.${ext}"
+
+    echo "[+] Extrayendo #$idx [$lang] $title"
+
+    ffmpeg -nostdin -loglevel error -y -i "$INPUT" -map 0:${idx} -c copy "$out"
+  ' _
+
+  rm -f "$TMP_JSON"
+}
+
+echo "[+] Buscando archivos de video..."
+
+VIDEOS=$(find_videos)
+
+if [[ -z "$VIDEOS" ]]; then
+  echo "[-] No se encontraron videos en el directorio actual."
+  exit 0
 fi
 
-
-modoDeUso() { 
-    echo "Modo de uso: $0 [OPCIÓN]  ";
-    echo "OPCIONES:" ;
-    echo " Por defecto extrae idiomas eng,esp,spa";
-    echo "-l, especifica un idioma, ej1: eng , ej2: spa" 
-    echo "-a, extrae todos los idomas";
-    echo "-h, help"
-}
- 
-extract(){
-    local LANG=${1} ;
-    fil=$(ls | grep -E $exte | wc -l)
-    if [ $fil -eq 0 ] ; then
-        echo "[-] No existen archivos de videos con extenciones $exte ";
-        exit 1
-    fi
-    for i in $(ls | grep -E $exte ); do
-        ffmpeg -i $i -report 2>/dev/null 
-        logs=$(cat *.log | wc -l)
-        extensions=$(echo $exte| sed 's/|/\\|/g')
-        if [ $logs -gt 0 ]; then
-            # posicion del primer subtitlo
-            posicion=$(cat *.log | grep Subtitle | grep -oP ':\d{1,2}' | awk '{print $2}' FS=':' | head -n 1 )
-            # lista de subtitulos en idioma eng
-            pos=$(cat *.log | grep Subtitle | grep $LANG | grep -oP ':\d{1,2}' | awk '{print $2}' FS=':' | xargs )
-            if [ ${#pos} -gt 0 ]; then
-                n=0
-                for j in $pos; do
-                    sub=$(echo $i | sed "s/$extensions/.$LANG.$n.srt/g" )
-                    echo $sub
-                    resta=$(($j-$posicion))
-                    ffmpeg -i $i -c copy -map 0:s:$resta "$sub" -y 2>/dev/null
-                    n=$(($n+1))
-                done;
-            else
-                echo "[-] No se encontraron subtitulos en idioma $LANG";
-            fi
-        fi
-    done;
-    
-    rm -fr *.log  
-}
-
-extractEngSpa(){
-    fil=$(ls | grep -E $exte | wc -l)
-    if [ $fil -eq 0 ] ; then
-        echo "[-] No existen archivos de videos con extenciones $exte ";
-        exit 1
-    fi
-    for i in $(ls | grep -E $exte ); do
-        ffmpeg -i $i -report 2>/dev/null 
-        logs=$(cat *.log | wc -l)
-        extensions=$(echo $exte| sed 's/|/\\|/g')
-        if [ $logs -gt 0 ]; then
-            # posicion del primer subtitlo
-            posicion=$(cat *.log | grep Subtitle | grep -oP ':\d{1,2}' | awk '{print $2}' FS=':' | head -n 1 )
-            # lista de subtitulos en idioma eng
-            pos=$(cat *.log | grep Subtitle | grep eng | grep -oP ':\d{1,2}' | awk '{print $2}' FS=':' | xargs )
-            if [ ${#pos} -gt 0 ]; then
-                n=0
-                for j in $pos; do
-                    sub=$(echo $i | sed "s/$extensions/.en.$n.srt/g" )
-                    echo $sub
-                    resta=$(($j-$posicion))
-                    ffmpeg -i $i -c copy -map 0:s:$resta "$sub" -y 2>/dev/null
-                    n=$(($n+1))
-                done;
-            else
-                echo "[-] No se encontraron subtitulos en ingles.";
-            fi
-            # subtitulos en español: spa , esp
-            pos=$(cat *.log | grep Subtitle | grep -E "esp|spa" | grep -oP ':\d{1,2}' | awk '{print $2}' FS=':' | xargs )
-            if [  ${#pos} -gt 0 ]; then
-                n=0
-                for j in $pos; do
-                    sub=$(echo $i | sed "s/$extensions/.es.$n.srt/g" )
-                    echo $sub
-                    resta=$(($j-$posicion))
-                    ffmpeg -i $i -c copy -map 0:s:$resta "$sub" -y 2>/dev/null
-                    n=$(($n+1))
-                done;
-            else 
-                echo "[-] No se encontraron subtitulos en español.";
-            fi
-            
-        fi
-    done;
-    
-    rm -fr *.log  
-}
- 
-extractAll(){
-    fil=$(ls | grep -E $exte | wc -l)
-    if [ $fil -eq 0 ] ; then
-        echo "[-] No existen archivos de videos con extenciones $exte ";
-        exit 1
-    fi
-    for i in $(ls | grep -E $exte ); do
-        ffmpeg -i $i -report 2>/dev/null 
-        logs=$(cat *.log | wc -l)
-        extensions=$(echo $exte| sed 's/|/\\|/g')
-        if [ $logs -gt 0 ]; then
-            # posicion del primer subtitlo
-            posicion=$(cat *.log | grep Subtitle | grep -oP ':\d{1,2}' | awk '{print $2}' FS=':' | head -n 1 )
-            # extraer listado de posiciones de subtitulos : 23-esp  
-            # pos=$(cat *.log | grep Subtitle | grep -oP ':\d{1,2}' | awk '{print $2}' FS=':' | xargs )
-            pos=$(cat *.log | grep Subtitle | grep -oP ':\d{1,2}\(.*?\)' | sed 's/://g' | sed 's/)//g' | sed 's/(/-/g' )
-            # si longitud > 0 tiene caracteres
-            if [ ${#pos} -gt 0 ]; then
-                n=0
-                for j in $pos; do
-                    p=$(echo $j | awk '{print $1}' FS='-')
-                    name=$(echo $j | awk '{print $2}' FS='-')
-                    sub=$(echo $i | sed "s/$extensions/.$name.$n.srt/g" )
-                    echo $sub
-                    resta=$(($p-$posicion))
-                    ffmpeg -i $i -c copy -map 0:s:$resta "$sub" -y 2>/dev/null
-                    n=$(($n+1))
-                done;
-            else
-                echo "[-] No se encontraron subtitulos en idioma $LANG";
-            fi
-        fi
-    done;
-    
-    rm -fr *.log  
-}
-
-while getopts "l:ah" o; do
-    case "${o}" in
-        l)
-            l=${OPTARG}
-            echo "Extraer subtitulos en idioma ${l}";
-            extract ${l}
-            exit 0;
-        ;;
-        a)
-            echo "Extraer todos los subtitulos";
-            extractAll
-            exit 0;
-        ;;
-        h|*)
-            modoDeUso
-            exit 0;
-        ;;
-         
-    esac
+for vid in $VIDEOS; do
+  process_file "$vid"
 done
-shift $((OPTIND-1))
- 
-extractEngSpa
 
-exit 0
-
-
-
+echo
+echo "[+] Proceso finalizado."
